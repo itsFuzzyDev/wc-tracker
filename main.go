@@ -168,6 +168,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.fetchErr = msg.err.Error()
 			return m, nil
 
+		case tea.MouseMsg:
+			return m.updateMouse(msg)
+
 		case themeDetectedMsg:
 			m.theme = msg.theme
 			m.autoDetectTheme = false
@@ -873,7 +876,7 @@ func (m model) View() string {
 
 	// Help
 	lines = append(lines, "")
-	lines = append(lines, m.styles.Dim.Render("1-3 tabs • ↑↓ navigate • enter detail • o open • r refresh • tab panel • esc back • ctrl+space search • teamA<>teamB • b sidebar • t theme • q quit"))
+	lines = append(lines, m.styles.Dim.Render("1-3 tabs • ↑↓/wheel navigate • enter/click detail • o open • r refresh • tab panel • esc back • ctrl+space search • teamA<>teamB • b sidebar • t theme • q quit"))
 
 	// Pad to exact height
 	rendered := strings.Join(lines, "\n")
@@ -1025,84 +1028,103 @@ func (m model) renderGames() []string {
 	return strings.Split(mainBlock, "\n")
 }
 
-func (m model) renderGamesSidebar() []string {
-	groups := m.data.AllGroups()
-	stages := AllStages()
-	stadiums := m.data.AllStadiums()
+type sbKind int
+
+const (
+	sbHeader sbKind = iota
+	sbItem
+	sbSep
+	sbBlank
+)
+
+// sbEntry is one sidebar line; the same list drives rendering and mouse
+// hit-testing, so the two can't drift apart.
+type sbEntry struct {
+	kind  sbKind
+	label string
+	focus int
+	value string
+}
+
+func (m model) sidebarEntries() []sbEntry {
 	const maxVisible = 6 // 1 pinned "All" + 5 scrollable
+	var out []sbEntry
 
-	renderItem := func(label string, focus int, filterVal string, selected bool) string {
-		if focus == m.filterFocus && selected {
-			return m.styles.Badge.Render(" " + label + " ")
-		} else if selected {
-			return m.styles.Selected.Render(" " + label + " ")
+	section := func(title string, focus int, opts []string, cur string) {
+		if len(out) > 0 {
+			out = append(out, sbEntry{kind: sbBlank})
 		}
-		return m.styles.Dim.Render(" " + label + " ")
+		out = append(out, sbEntry{kind: sbHeader, label: title})
+		// Pinned "All"
+		out = append(out, sbEntry{kind: sbItem, label: "All", focus: focus, value: "All"})
+		// Scrollable rest (skip "All")
+		var rest []string
+		for _, o := range opts {
+			if o != "All" {
+				rest = append(rest, o)
+			}
+		}
+		selIdx := 0
+		for i, o := range rest {
+			if o == cur {
+				selIdx = i
+				break
+			}
+		}
+		scroll := smartScroll(selIdx, len(rest), maxVisible-1)
+		end := scroll + maxVisible - 1
+		if end > len(rest) {
+			end = len(rest)
+		}
+		for i := scroll; i < end; i++ {
+			label := rest[i]
+			if len(label) > 14 {
+				label = label[:14] + ".."
+			}
+			out = append(out, sbEntry{kind: sbItem, label: label, focus: focus, value: rest[i]})
+		}
+		out = append(out, sbEntry{kind: sbSep})
 	}
 
+	section("GROUP", 0, m.data.AllGroups(), m.gamesFilter.GroupFilter)
+	section("STAGE", 1, AllStages(), m.gamesFilter.StageFilter)
+	section("STADIUM", 2, m.data.AllStadiums(), m.gamesFilter.StadiumFilter)
+	return out
+}
+
+func (m model) currentFilter(focus int) string {
+	switch focus {
+	case 0:
+		return m.gamesFilter.GroupFilter
+	case 1:
+		return m.gamesFilter.StageFilter
+	case 2:
+		return m.gamesFilter.StadiumFilter
+	}
+	return ""
+}
+
+func (m model) renderGamesSidebar() []string {
 	var lines []string
-
-	// ── GROUP section ──
-	lines = append(lines, m.styles.Accent.Bold(true).Render("GROUP"))
-	// Pinned "All"
-	lines = append(lines, renderItem("All", 0, m.gamesFilter.GroupFilter, m.gamesFilter.GroupFilter == "All"))
-	// Scrollable groups (skip "All")
-	rest := groups[1:]
-	selIdx := 0
-	for i, g := range rest {
-		if g == m.gamesFilter.GroupFilter { selIdx = i; break }
+	for _, e := range m.sidebarEntries() {
+		switch e.kind {
+		case sbHeader:
+			lines = append(lines, m.styles.Accent.Bold(true).Render(e.label))
+		case sbSep:
+			lines = append(lines, m.styles.Dim.Render("─"))
+		case sbBlank:
+			lines = append(lines, "")
+		case sbItem:
+			selected := m.currentFilter(e.focus) == e.value
+			if e.focus == m.filterFocus && selected {
+				lines = append(lines, m.styles.Badge.Render(" "+e.label+" "))
+			} else if selected {
+				lines = append(lines, m.styles.Selected.Render(" "+e.label+" "))
+			} else {
+				lines = append(lines, m.styles.Dim.Render(" "+e.label+" "))
+			}
+		}
 	}
-	scroll := smartScroll(selIdx, len(rest), maxVisible-1)
-	end := scroll + maxVisible - 1
-	if end > len(rest) { end = len(rest) }
-	for i := scroll; i < end; i++ {
-		lines = append(lines, renderItem(rest[i], 0, m.gamesFilter.GroupFilter, rest[i] == m.gamesFilter.GroupFilter))
-	}
-	lines = append(lines, m.styles.Dim.Render("─"))
-
-	// ── STAGE section ──
-	lines = append(lines, "")
-	lines = append(lines, m.styles.Accent.Bold(true).Render("STAGE"))
-	// Pinned "All"
-	lines = append(lines, renderItem("All", 1, m.gamesFilter.StageFilter, m.gamesFilter.StageFilter == "All"))
-	// Scrollable stages (skip "All")
-	rest = stages[1:]
-	selIdx = 0
-	for i, s := range rest {
-		if s == m.gamesFilter.StageFilter { selIdx = i; break }
-	}
-	scroll = smartScroll(selIdx, len(rest), maxVisible-1)
-	end = scroll + maxVisible - 1
-	if end > len(rest) { end = len(rest) }
-	for i := scroll; i < end; i++ {
-		lines = append(lines, renderItem(rest[i], 1, m.gamesFilter.StageFilter, rest[i] == m.gamesFilter.StageFilter))
-	}
-	lines = append(lines, m.styles.Dim.Render("─"))
-
-	// ── STADIUM section ──
-	lines = append(lines, "")
-	lines = append(lines, m.styles.Accent.Bold(true).Render("STADIUM"))
-	// Pinned "All"
-	lines = append(lines, renderItem("All", 2, m.gamesFilter.StadiumFilter, m.gamesFilter.StadiumFilter == "All"))
-	// Scrollable stadiums (skip "All")
-	var restStadiums []string
-	for _, s := range stadiums {
-		if s != "All" { restStadiums = append(restStadiums, s) }
-	}
-	selIdx = 0
-	for i, s := range restStadiums {
-		if s == m.gamesFilter.StadiumFilter { selIdx = i; break }
-	}
-	scroll = smartScroll(selIdx, len(restStadiums), maxVisible-1)
-	end = scroll + maxVisible - 1
-	if end > len(restStadiums) { end = len(restStadiums) }
-	for i := scroll; i < end; i++ {
-		label := restStadiums[i]
-		if len(label) > 14 { label = label[:14] + ".." }
-		lines = append(lines, renderItem(label, 2, m.gamesFilter.StadiumFilter, restStadiums[i] == m.gamesFilter.StadiumFilter))
-	}
-	lines = append(lines, m.styles.Dim.Render("─"))
-
 	return lines
 }
 
@@ -1449,7 +1471,7 @@ func (m model) renderSettings() []string {
 }
 
 func main() {
-	p := tea.NewProgram(initialModel(), tea.WithAltScreen())
+	p := tea.NewProgram(initialModel(), tea.WithAltScreen(), tea.WithMouseAllMotion())
 	if _, err := p.Run(); err != nil {
 		fmt.Printf("Error: %v\n", err)
 		os.Exit(1)
